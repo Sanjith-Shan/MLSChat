@@ -42,6 +42,8 @@ pub enum RejectCode {
     Malformed = 5,
     /// Application message from an epoch too old to be decrypted.
     TooOld = 6,
+    /// Sequenced send that is not the sender's next number; `expected_seq` says which is.
+    OutOfOrder = 7,
 }
 
 impl Codec for RejectCode {
@@ -56,6 +58,7 @@ impl Codec for RejectCode {
             4 => RejectCode::GroupExists,
             5 => RejectCode::Malformed,
             6 => RejectCode::TooOld,
+            7 => RejectCode::OutOfOrder,
             x => return Err(CodecError::BadEnum(x as u64, "RejectCode")),
         })
     }
@@ -73,8 +76,12 @@ pub struct SendReq {
     /// Devices removed by this commit; they stop receiving fan-out after it.
     pub remove_members: Vec<ClientId>,
     pub welcome: Option<Vec<u8>>,
+    /// Per-sender, per-group sequence number for application messages (1, 2, ...);
+    /// 0 for unsequenced sends (commits, proposals). The server accepts only the
+    /// next number, so a sender's messages are logged in the order they were sent.
+    pub sender_seq: u64,
 }
-mls::impl_codec!(SendReq { req_id, group_id, msg_id, payload, add_members, remove_members, welcome });
+mls::impl_codec!(SendReq { req_id, group_id, msg_id, payload, add_members, remove_members, welcome, sender_seq });
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientMsg {
@@ -110,7 +117,7 @@ pub enum ServerMsg {
     KeyPackage { req_id: u64, key_package: Option<Vec<u8>> },
     GroupCreated { req_id: u64, ok: bool },
     Accepted { req_id: u64, msg_id: MsgId, seq: u64, epoch: u64, duplicate: bool },
-    Rejected { req_id: u64, msg_id: MsgId, code: RejectCode, current_epoch: u64 },
+    Rejected { req_id: u64, msg_id: MsgId, code: RejectCode, current_epoch: u64, expected_seq: u64 },
     Deliver(Delivery),
     /// Log replay finished; `next_seq` is one past the last entry.
     FetchDone { group_id: GroupId, next_seq: u64 },
@@ -207,12 +214,13 @@ impl Codec for ServerMsg {
                 epoch.encode(out);
                 (*duplicate as u8).encode(out);
             }
-            ServerMsg::Rejected { req_id, msg_id, code, current_epoch } => {
+            ServerMsg::Rejected { req_id, msg_id, code, current_epoch, expected_seq } => {
                 5u8.encode(out);
                 req_id.encode(out);
                 msg_id.encode(out);
                 code.encode(out);
                 current_epoch.encode(out);
+                expected_seq.encode(out);
             }
             ServerMsg::Deliver(d) => {
                 6u8.encode(out);
@@ -251,7 +259,13 @@ impl Codec for ServerMsg {
                 epoch: Codec::decode(r)?,
                 duplicate: bool8(r)?,
             },
-            5 => ServerMsg::Rejected { req_id: Codec::decode(r)?, msg_id: Codec::decode(r)?, code: Codec::decode(r)?, current_epoch: Codec::decode(r)? },
+            5 => ServerMsg::Rejected {
+                req_id: Codec::decode(r)?,
+                msg_id: Codec::decode(r)?,
+                code: Codec::decode(r)?,
+                current_epoch: Codec::decode(r)?,
+                expected_seq: Codec::decode(r)?,
+            },
             6 => ServerMsg::Deliver(Codec::decode(r)?),
             7 => ServerMsg::FetchDone { group_id: Codec::decode(r)?, next_seq: Codec::decode(r)? },
             8 => ServerMsg::Welcome { inbox_seq: Codec::decode(r)?, group_id: Codec::decode(r)?, start_seq: Codec::decode(r)?, welcome: Codec::decode(r)? },

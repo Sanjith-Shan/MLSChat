@@ -1,0 +1,16 @@
+[package]
+name = "interop"
+description = "MLSChat as a client of the mlswg/mls-implementations interop harness (gRPC)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mlschat-interop"
+path = "src/main.rs"
+
+[dependencies]
+mls = { path = "../mls" }
+mls_interop_proto = { git = "https://github.com/mlswg/mls-implementations/", rev = "cfd450286d1bfd9cd2519b95c80f9771f94a5b1a" }
+tonic = "0.14"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -66,6 +66,8 @@ struct GroupState {
     acked: u64,
     /// identity of each device, by leaf, for routing removes.
     removed: bool,
+    /// Next sender_seq for our application messages in this group.
+    next_send_seq: u64,
 }
 
 #[derive(Clone)]
@@ -75,6 +77,10 @@ struct PendingSend {
     sent_at: Instant,
     /// Kept for application messages so they can be re-encrypted if their epoch expires.
     plaintext: Option<Vec<u8>>,
+    /// Rejected as out of order: resend after an earlier message is accepted.
+    waiting: bool,
+    /// Rejected as too old: re-encrypt once our group reaches this epoch.
+    defer_until: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -208,7 +214,7 @@ impl Client {
         }
         let inbox = ClientMsg::FetchInbox { from_seq: self.inbox_next };
         self.raw_send(&inbox).await;
-        let mut resend: Vec<PendingSend> = self.pending.values().cloned().collect();
+        let mut resend: Vec<PendingSend> = self.pending.values().filter(|p| p.defer_until.is_none()).cloned().collect();
         resend.sort_by_key(|p| p.req.req_id);
         for p in resend {
             self.resent += 1;
@@ -309,26 +315,35 @@ impl Client {
                             }
                         }
                     }
+                    if p.kind == Kind::Application {
+                        self.resend_waiting(&p.req.group_id).await;
+                    }
                 }
                 self.outcomes.insert(req_id, SendOutcome::Accepted { seq });
             }
-            ServerMsg::Rejected { req_id, msg_id, code, current_epoch } => {
-                if let Some(p) = self.pending.remove(&msg_id) {
-                    if p.kind == Kind::Application && code == RejectCode::TooOld {
-                        if let Some(pt) = p.plaintext.clone() {
-                            // Never accepted, so re-encrypting under the current epoch cannot duplicate it.
-                            if let Some(st) = self.groups.get_mut(&p.req.group_id) {
-                                if let Ok(m) = st.group.encrypt_application(&pt, b"") {
-                                    let mut req = p.req.clone();
-                                    req.msg_id = new_msg_id();
-                                    req.payload = m.to_bytes();
-                                    self.pending.insert(req.msg_id.clone(), PendingSend { req: req.clone(), kind: Kind::Application, sent_at: Instant::now(), plaintext: Some(pt) });
-                                    self.raw_send(&ClientMsg::Send(req)).await;
-                                    return;
-                                }
+            ServerMsg::Rejected { req_id, msg_id, code, current_epoch, expected_seq } => {
+                if let Some(p) = self.pending.get_mut(&msg_id) {
+                    if p.kind == Kind::Application && p.req.sender_seq > 0 {
+                        match code {
+                            // An earlier message of ours is not in yet: wait for it, then resend in order.
+                            RejectCode::OutOfOrder if p.req.sender_seq >= expected_seq => {
+                                p.waiting = true;
+                                return;
                             }
+                            // Built on an epoch the server no longer accepts. It was never logged, so
+                            // re-encrypting it (same sender_seq) cannot duplicate it; wait until we have
+                            // caught up to an epoch the server accepts.
+                            RejectCode::TooOld => {
+                                p.defer_until = Some(current_epoch.saturating_sub(1));
+                                let g = p.req.group_id.clone();
+                                self.release_deferred(&g).await;
+                                return;
+                            }
+                            _ => {}
                         }
                     }
+                }
+                if let Some(p) = self.pending.remove(&msg_id) {
                     if p.kind == Kind::Commit {
                         if let Some(s) = self.groups.get_mut(&p.req.group_id) {
                             s.group.clear_pending_commit();
@@ -357,7 +372,7 @@ impl Client {
         match Group::join(&w, &kpb, None, PskStore::default(), self.config.group.clone()) {
             Ok(g) => {
                 self.key_packages.remove(&kpb.key_package.reference());
-                self.groups.insert(group_id.clone(), GroupState { group: g, next_seq: start_seq, buffer: BTreeMap::new(), acked: start_seq, removed: false });
+                self.groups.insert(group_id.clone(), GroupState { group: g, next_seq: start_seq, buffer: BTreeMap::new(), acked: start_seq, removed: false, next_send_seq: 1 });
                 self.events.push_back(Event::Joined { group_id: group_id.clone() });
                 self.raw_send(&ClientMsg::Fetch { group_id, from_seq: start_seq }).await;
             }
@@ -365,8 +380,54 @@ impl Client {
         }
     }
 
+    /// Resend, in order, our application messages that were rejected as out of order.
+    async fn resend_waiting(&mut self, group_id: &[u8]) {
+        let mut w: Vec<SendReq> = self
+            .pending
+            .values_mut()
+            .filter(|p| p.waiting && p.req.group_id == group_id)
+            .map(|p| {
+                p.waiting = false;
+                p.req.clone()
+            })
+            .collect();
+        w.sort_by_key(|r| r.sender_seq);
+        for r in w {
+            self.raw_send(&ClientMsg::Send(r)).await;
+        }
+    }
+
+    /// Re-encrypt and resend deferred (too old) messages once our epoch allows it.
+    async fn release_deferred(&mut self, group_id: &[u8]) {
+        let Some(st) = self.groups.get_mut(group_id) else { return };
+        let epoch = st.group.epoch();
+        let mut ready: Vec<MsgId> = self
+            .pending
+            .iter()
+            .filter(|(_, p)| p.req.group_id == group_id && p.defer_until.map(|t| epoch >= t).unwrap_or(false))
+            .map(|(k, _)| k.clone())
+            .collect();
+        ready.sort_by_key(|k| self.pending[k].req.sender_seq);
+        for k in ready {
+            let mut p = self.pending.remove(&k).unwrap();
+            let Some(pt) = p.plaintext.clone() else { continue };
+            let Ok(m) = st.group.encrypt_application(&pt, b"") else { continue };
+            p.req.msg_id = new_msg_id();
+            p.req.payload = m.to_bytes();
+            p.defer_until = None;
+            p.waiting = false;
+            let req = p.req.clone();
+            self.pending.insert(req.msg_id.clone(), p);
+            let Some(ws) = self.ws.as_mut() else { continue };
+            if ws.send(Message::Binary(ClientMsg::Send(req).to_bytes())).await.is_err() {
+                self.ws = None;
+            }
+        }
+    }
+
     async fn on_delivery(&mut self, d: Delivery) {
         let gid = d.group_id.clone();
+        let d_gid = gid.clone();
         let ack_every = self.config.ack_every;
         let mut ack = None;
         {
@@ -391,6 +452,10 @@ impl Client {
         }
         if let Some(seq) = ack {
             self.raw_send(&ClientMsg::Ack { group_id: gid, seq }).await;
+        }
+        if self.pending.values().any(|p| p.defer_until.is_some()) {
+            let g = d_gid;
+            self.release_deferred(&g).await;
         }
     }
 
@@ -470,8 +535,17 @@ impl Client {
     }
 
     pub async fn fetch_key_package(&mut self, who: &[u8]) -> Result<mls::messages::KeyPackage> {
-        let req_id = self.req_id();
-        let r = self.request(ClientMsg::FetchKeyPackage { req_id, client_id: who.to_vec() }, req_id, Instant::now() + Duration::from_secs(10)).await?;
+        // Publishing is fire-and-forget on the publisher's own connection, so a fetch
+        // can overtake it. Retry briefly before giving up (exp3 found this race).
+        let mut r = ServerMsg::KeyPackage { req_id: 0, key_package: None };
+        for attempt in 0..20 {
+            let req_id = self.req_id();
+            r = self.request(ClientMsg::FetchKeyPackage { req_id, client_id: who.to_vec() }, req_id, Instant::now() + Duration::from_secs(10)).await?;
+            if matches!(r, ServerMsg::KeyPackage { key_package: Some(_), .. }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10 * (attempt + 1))).await;
+        }
         match r {
             ServerMsg::KeyPackage { key_package: Some(b), .. } => match MlsMessage::from_bytes(&b)? {
                 MlsMessage::KeyPackage(kp) => Ok(kp),
@@ -488,15 +562,20 @@ impl Client {
             return Err(ClientError::Other("group exists".into()));
         }
         let g = Group::create(self.cs, self.signer.clone(), group_id.to_vec(), vec![], self.config.group.clone())?;
-        self.groups.insert(group_id.to_vec(), GroupState { group: g, next_seq: 0, buffer: BTreeMap::new(), acked: 0, removed: false });
+        self.groups.insert(group_id.to_vec(), GroupState { group: g, next_seq: 0, buffer: BTreeMap::new(), acked: 0, removed: false, next_send_seq: 1 });
         Ok(())
     }
 
     /// Submit a send and return its request id; the answer arrives via `pump`.
     pub async fn submit(&mut self, group_id: &[u8], payload: Vec<u8>, kind: Kind, add: Vec<ClientId>, remove: Vec<ClientId>, welcome: Option<Vec<u8>>) -> u64 {
+        self.submit_seq(group_id, payload, kind, add, remove, welcome, 0, None).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn submit_seq(&mut self, group_id: &[u8], payload: Vec<u8>, kind: Kind, add: Vec<ClientId>, remove: Vec<ClientId>, welcome: Option<Vec<u8>>, sender_seq: u64, plaintext: Option<Vec<u8>>) -> u64 {
         let req_id = self.req_id();
-        let req = SendReq { req_id, group_id: group_id.to_vec(), msg_id: new_msg_id(), payload, add_members: add, remove_members: remove, welcome };
-        self.pending.insert(req.msg_id.clone(), PendingSend { req: req.clone(), kind, sent_at: Instant::now(), plaintext: None });
+        let req = SendReq { req_id, group_id: group_id.to_vec(), msg_id: new_msg_id(), payload, add_members: add, remove_members: remove, welcome, sender_seq };
+        self.pending.insert(req.msg_id.clone(), PendingSend { req: req.clone(), kind, sent_at: Instant::now(), plaintext, waiting: false, defer_until: None });
         self.raw_send(&ClientMsg::Send(req)).await;
         req_id
     }
@@ -514,11 +593,9 @@ impl Client {
     pub async fn send_text(&mut self, group_id: &[u8], text: &[u8]) -> Result<u64> {
         let st = self.groups.get_mut(group_id).ok_or_else(|| ClientError::Other("unknown group".into()))?;
         let m = st.group.encrypt_application(text, b"")?;
-        let id = self.submit(group_id, m.to_bytes(), Kind::Application, vec![], vec![], None).await;
-        if let Some(p) = self.pending.values_mut().find(|p| p.req.req_id == id) {
-            p.plaintext = Some(text.to_vec());
-        }
-        Ok(id)
+        let seq = st.next_send_seq;
+        st.next_send_seq += 1;
+        Ok(self.submit_seq(group_id, m.to_bytes(), Kind::Application, vec![], vec![], None, seq, Some(text.to_vec())).await)
     }
 
     /// Wait until our log position reaches the group's current end (all our sends applied).

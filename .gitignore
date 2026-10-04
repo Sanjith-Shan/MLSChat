@@ -11,3 +11,4 @@ node_modules/
 *.sst
 /data/
 BUILD_BRIEF.md
+fuzz/target/

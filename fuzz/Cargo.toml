@@ -1,0 +1,40 @@
+[package]
+name = "mlschat-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mls = { path = "../crates/mls" }
+wire = { path = "../crates/wire" }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "mls_message"
+path = "fuzz_targets/mls_message.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "ratchet_tree"
+path = "fuzz_targets/ratchet_tree.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wire_frames"
+path = "fuzz_targets/wire_frames.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "group_process"
+path = "fuzz_targets/group_process.rs"
+test = false
+doc = false

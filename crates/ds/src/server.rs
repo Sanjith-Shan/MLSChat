@@ -206,7 +206,7 @@ impl Server {
                 let ok = if self.group(&group_id).await?.is_some() {
                     false
                 } else {
-                    let meta = GroupMeta { epoch: 0, next_seq: 0, members: vec![me.clone()] };
+                    let meta = GroupMeta { epoch: 0, next_seq: 0, members: vec![me.clone()], sender_seqs: vec![] };
                     self.store.create_group(&group_id, &meta)?;
                     true
                 };
@@ -243,7 +243,7 @@ impl Server {
         let reply = |m: ServerMsg| {
             let _ = tx.send(m.to_bytes());
         };
-        let rejected = |code, current_epoch| ServerMsg::Rejected { req_id: req.req_id, msg_id: req.msg_id.clone(), code, current_epoch };
+        let rejected = |code, current_epoch| ServerMsg::Rejected { req_id: req.req_id, msg_id: req.msg_id.clone(), code, current_epoch, expected_seq: 0 };
         let header = match parse_header(&req.payload) {
             Ok(h) if h.group_id == req.group_id => h,
             _ => {
@@ -282,6 +282,13 @@ impl Server {
                 }
             }
             Kind::Application => {
+                if req.sender_seq > 0 {
+                    let expected = meta.last_sender_seq(me) + 1;
+                    if req.sender_seq != expected {
+                        reply(ServerMsg::Rejected { req_id: req.req_id, msg_id: req.msg_id.clone(), code: RejectCode::OutOfOrder, current_epoch: meta.epoch, expected_seq: expected });
+                        return Ok(());
+                    }
+                }
                 if header.epoch > meta.epoch && fenced {
                     reply(rejected(RejectCode::Malformed, meta.epoch));
                     return Ok(());
@@ -296,6 +303,9 @@ impl Server {
         let seq = meta.next_seq;
         let mut next = meta.clone();
         next.next_seq += 1;
+        if header.kind == Kind::Application && req.sender_seq > 0 {
+            next.set_sender_seq(me, req.sender_seq);
+        }
         let recipients = meta.members.clone();
         let mut welcomes = Vec::new();
         if header.kind == Kind::Commit {

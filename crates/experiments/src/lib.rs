@@ -90,13 +90,16 @@ pub fn build(cs: CipherSuite, n: usize, measured_leaves: &[u32]) -> BigGroup {
 }
 
 impl BigGroup {
-    /// Count of parent nodes holding a key, out of parents that have any member below.
+    /// Parent nodes holding a key, out of parents with members under both children.
     pub fn parent_fill(&self) -> (usize, usize) {
         let t = self.creator.tree();
         let mut filled = 0;
         let mut total = 0;
         for x in (1..(2 * t.n_leaves() - 1)).step_by(2) {
-            let has_member = mls::tree_math::leaves_under(x).any(|l| t.leaf(l).is_some());
+            // A parent whose left or right subtree has no members is never on a filtered
+            // direct path, so RFC 9420 leaves it blank. Count only parents that can hold a key.
+            let under = |c: u32| mls::tree_math::leaves_under(c).any(|l| t.leaf(l).is_some());
+            let has_member = under(mls::tree_math::left(x).unwrap()) && under(mls::tree_math::right(x).unwrap());
             if has_member {
                 total += 1;
                 if !t.is_blank(x) {

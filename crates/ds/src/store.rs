@@ -21,8 +21,29 @@ pub struct GroupMeta {
     /// Sequence number of the next log entry.
     pub next_seq: u64,
     pub members: Vec<ClientId>,
+    /// Last accepted sender_seq per sender.
+    pub sender_seqs: Vec<SenderSeq>,
 }
-mls::impl_codec!(GroupMeta { epoch, next_seq, members });
+mls::impl_codec!(GroupMeta { epoch, next_seq, members, sender_seqs });
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct SenderSeq {
+    pub sender: ClientId,
+    pub last: u64,
+}
+mls::impl_codec!(SenderSeq { sender, last });
+
+impl GroupMeta {
+    pub fn last_sender_seq(&self, s: &[u8]) -> u64 {
+        self.sender_seqs.iter().find(|x| x.sender == s).map(|x| x.last).unwrap_or(0)
+    }
+    pub fn set_sender_seq(&mut self, s: &[u8], v: u64) {
+        match self.sender_seqs.iter_mut().find(|x| x.sender == s) {
+            Some(x) => x.last = v,
+            None => self.sender_seqs.push(SenderSeq { sender: s.to_vec(), last: v }),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InboxEntry {

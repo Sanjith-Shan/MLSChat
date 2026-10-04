@@ -180,6 +180,7 @@ impl WebClient {
                     add_members: add,
                     remove_members: remove,
                     welcome: out.welcome.map(|w| w.to_bytes()),
+                    sender_seq: 0,
                 };
                 self.send(ClientMsg::Send(req));
             }
@@ -195,7 +196,7 @@ impl WebClient {
                 let bytes = m.to_bytes();
                 let size = bytes.len();
                 self.next_req += 1;
-                let req = SendReq { req_id: self.next_req, group_id: gid, msg_id: mls::crypto::random_bytes(16), payload: bytes, add_members: vec![], remove_members: vec![], welcome: None };
+                let req = SendReq { req_id: self.next_req, group_id: gid, msg_id: mls::crypto::random_bytes(16), payload: bytes, add_members: vec![], remove_members: vec![], welcome: None, sender_seq: 0 };
                 self.send(ClientMsg::Send(req));
                 self.emit(json!({"type": "sent", "group": group, "text": text, "bytes": size}));
             }

@@ -12,3 +12,6 @@ export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 # The pip libclang wheel ships without clang's builtin headers; borrow GCC's for bindgen.
 GCC_INC="$(ls -d /usr/lib/gcc/x86_64-linux-gnu/*/include 2>/dev/null | sort -V | tail -1)"
 [ -n "$GCC_INC" ] && export BINDGEN_EXTRA_CLANG_ARGS="-I$GCC_INC"
+# protoc for the interop harness's generated gRPC types (user-local download).
+[ -x "$MLS_WORK/protoc/bin/protoc" ] && export PROTOC="$MLS_WORK/protoc/bin/protoc"
+export PATH="$MLS_WORK/go/bin:$PATH"

@@ -168,7 +168,8 @@ pub struct CommitSummary {
 pub struct CommitOutput {
     pub commit: MlsMessage,
     pub welcome: Option<MlsMessage>,
-    pub group_info: GroupInfo,
+    /// Signed GroupInfo for the new epoch; built only when a Welcome needs it.
+    pub group_info: Option<GroupInfo>,
     /// Bytes of the UpdatePath carried in the commit, zero without a path.
     pub path_bytes: usize,
 }
@@ -249,6 +250,10 @@ impl Group {
     }
     pub fn has_pending_commit(&self) -> bool {
         self.pending.is_some()
+    }
+    /// The staged next-epoch state of our pending commit.
+    pub fn pending_state(&self) -> Option<&Group> {
+        self.pending.as_ref().map(|p| &p.0)
     }
     pub fn signer(&self) -> &Signer {
         &self.signer
@@ -834,11 +839,13 @@ impl Group {
             next.past.pop_front();
         }
 
-        let group_info = next.group_info(next.config.ratchet_tree_extension, next.config.external_pub_extension)?;
-        let welcome = if applied.added.is_empty() {
-            None
+        // Signing a GroupInfo means serializing the whole tree, which is O(n);
+        // do it only when a Welcome needs one (exp1 caught this, see BUG_LOG).
+        let (welcome, group_info) = if applied.added.is_empty() {
+            (None, None)
         } else {
-            Some(MlsMessage::Welcome(next.build_welcome(&group_info, &applied, &path_secrets)?))
+            let gi = next.group_info(next.config.ratchet_tree_extension, next.config.external_pub_extension)?;
+            (Some(MlsMessage::Welcome(next.build_welcome(&gi, &applied, &path_secrets)?)), Some(gi))
         };
         let bytes = msg.to_bytes();
         self.pending = Some(Box::new((next, bytes)));
@@ -924,6 +931,9 @@ impl Group {
             Content::Proposal(p) => {
                 self.check_proposal_sender(p, ac.content.sender)?;
                 let r = self.proposal_ref(&ac);
+                if self.proposals.iter().any(|c| c.reference == r) {
+                    return Ok(Processed::Proposal { sender: ac.content.sender, reference: r, proposal: p.clone() });
+                }
                 self.proposals.push(CachedProposal { reference: r.clone(), proposal: p.clone(), sender: ac.content.sender });
                 Ok(Processed::Proposal { sender: ac.content.sender, reference: r, proposal: p.clone() })
             }
@@ -1114,6 +1124,19 @@ impl Group {
         psks: PskStore,
         config: GroupConfig,
     ) -> Result<(Group, MlsMessage)> {
+        Self::join_external_with_psks(gi, ratchet_tree, signer, remove_prior, vec![], psks, config)
+    }
+
+    /// External commit that also injects PSKs (each id must resolve in `psks`).
+    pub fn join_external_with_psks(
+        gi: &GroupInfo,
+        ratchet_tree: Option<RatchetTree>,
+        signer: Signer,
+        remove_prior: Option<LeafIndex>,
+        psk_ids: Vec<PreSharedKeyId>,
+        psks: PskStore,
+        config: GroupConfig,
+    ) -> Result<(Group, MlsMessage)> {
         let ctx = gi.group_context.clone();
         let cs = ctx.cipher_suite;
         cs.check()?;
@@ -1139,6 +1162,9 @@ impl Group {
         let mut proposals = vec![Proposal::ExternalInit(kem_output)];
         if let Some(l) = remove_prior {
             proposals.push(Proposal::Remove(l));
+        }
+        for id in psk_ids {
+            proposals.push(Proposal::PreSharedKey(id));
         }
         // A provisional state at the current epoch, with throwaway secrets that are never used.
         let dummy = ks::from_joiner(cs, &vec![0u8; cs.nh()], None, &ctx.to_bytes())?;
@@ -1277,4 +1303,64 @@ impl Group {
     pub fn tree_bytes(&self) -> usize {
         self.tree.to_bytes().len()
     }
+}
+
+impl Group {
+    /// Whether this handshake or application message was sent by us.
+    pub fn is_own_message(&self, msg: &MlsMessage) -> bool {
+        match msg {
+            MlsMessage::Public(p) => p.content.sender == Sender::Member(self.private.leaf),
+            MlsMessage::Private(p) if p.epoch == self.context.epoch => framing::decrypt_sender_data(self.cs, p, &self.secrets.sender_data_secret)
+                .map(|sd| sd.leaf_index == self.private.leaf)
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    /// Reference of a proposal message we sent or cached, if known.
+    pub fn cached_reference_of(&self, p: &Proposal) -> Option<ProposalRef> {
+        self.proposals.iter().find(|c| &c.proposal == p).map(|c| c.reference.clone())
+    }
+
+    /// Add an extension to the group context extensions (for a GroupContextExtensions proposal).
+    pub fn extensions_with(&self, add: Extension) -> Vec<Extension> {
+        let mut v: Vec<Extension> = self.context.extensions.iter().filter(|e| e.extension_type != add.extension_type).cloned().collect();
+        v.push(add);
+        v
+    }
+
+    /// Resumption PSK id for one of this group's past epochs.
+    pub fn resumption_psk_id(&self, epoch: u64) -> PreSharedKeyId {
+        PreSharedKeyId {
+            psk: Psk::Resumption { usage: ResumptionPskUsage::Application, psk_group_id: self.context.group_id.clone(), psk_epoch: epoch },
+            psk_nonce: random_bytes(self.cs.nh()),
+        }
+    }
+}
+
+/// A proposal from an external sender listed in the group's external_senders
+/// extension (RFC 9420 section 12.1.8), as a PublicMessage.
+pub fn external_proposal(cs: CipherSuite, ctx: &GroupContext, sender_index: u32, signature_priv: &[u8], proposal: Proposal) -> Result<MlsMessage> {
+    let fc = FramedContent {
+        group_id: ctx.group_id.clone(),
+        epoch: ctx.epoch,
+        sender: Sender::External(sender_index),
+        authenticated_data: vec![],
+        content: Content::Proposal(proposal),
+    };
+    let ac = framing::sign_content(cs, signature_priv, WireFormat::PublicMessage, fc, None, None)?;
+    Ok(MlsMessage::Public(PublicMessage { content: ac.content, auth: ac.auth, membership_tag: None }))
+}
+
+/// A would-be member proposing its own Add (sender new_member_proposal).
+pub fn new_member_add_proposal(ctx: &GroupContext, kpb: &KeyPackageBundle) -> Result<MlsMessage> {
+    let fc = FramedContent {
+        group_id: ctx.group_id.clone(),
+        epoch: ctx.epoch,
+        sender: Sender::NewMemberProposal,
+        authenticated_data: vec![],
+        content: Content::Proposal(Proposal::Add(kpb.key_package.clone())),
+    };
+    let ac = framing::sign_content(ctx.cipher_suite, &kpb.signer.signature_priv, WireFormat::PublicMessage, fc, None, None)?;
+    Ok(MlsMessage::Public(PublicMessage { content: ac.content, auth: ac.auth, membership_tag: None }))
 }
