@@ -1,0 +1,9 @@
+[package]
+name = "harness"
+description = "Shared helpers for experiments: machine and load metadata, JSONL output"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json = "1"

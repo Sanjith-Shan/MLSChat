@@ -53,6 +53,7 @@ pub enum KemAlg {
     P256,
     P384,
     P521,
+    X448,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +62,7 @@ pub enum SigAlg {
     EcdsaP256,
     EcdsaP384,
     EcdsaP521,
+    Ed448,
 }
 
 /// An MLS cipher suite (RFC 9420 section 17.1).
@@ -79,11 +81,13 @@ impl Codec for CipherSuite {
 pub const MLS_128_DHKEMX25519_AES128GCM_SHA256_ED25519: CipherSuite = CipherSuite(1);
 pub const MLS_128_DHKEMP256_AES128GCM_SHA256_P256: CipherSuite = CipherSuite(2);
 pub const MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_ED25519: CipherSuite = CipherSuite(3);
+pub const MLS_256_DHKEMX448_AES256GCM_SHA512_ED448: CipherSuite = CipherSuite(4);
 pub const MLS_256_DHKEMP521_AES256GCM_SHA512_P521: CipherSuite = CipherSuite(5);
+pub const MLS_256_DHKEMX448_CHACHA20POLY1305_SHA512_ED448: CipherSuite = CipherSuite(6);
 pub const MLS_256_DHKEMP384_AES256GCM_SHA384_P384: CipherSuite = CipherSuite(7);
 
-/// Suites this library implements. 4 and 6 (X448/Ed448) are not implemented.
-pub const SUPPORTED_SUITES: [u16; 5] = [1, 2, 3, 5, 7];
+/// Suites this library implements: all seven defined in RFC 9420.
+pub const SUPPORTED_SUITES: [u16; 7] = [1, 2, 3, 4, 5, 6, 7];
 
 impl CipherSuite {
     pub fn is_supported(self) -> bool {
@@ -97,7 +101,9 @@ impl CipherSuite {
             1 => (KemAlg::X25519, Aes128Gcm, Sha256, SigAlg::Ed25519),
             2 => (KemAlg::P256, Aes128Gcm, Sha256, SigAlg::EcdsaP256),
             3 => (KemAlg::X25519, ChaCha20Poly1305, Sha256, SigAlg::Ed25519),
+            4 => (KemAlg::X448, Aes256Gcm, Sha512, SigAlg::Ed448),
             5 => (KemAlg::P521, Aes256Gcm, Sha512, SigAlg::EcdsaP521),
+            6 => (KemAlg::X448, ChaCha20Poly1305, Sha512, SigAlg::Ed448),
             7 => (KemAlg::P384, Aes256Gcm, Sha384, SigAlg::EcdsaP384),
             x => return Err(CryptoError::UnsupportedSuite(x)),
         })
@@ -359,6 +365,7 @@ impl AeadAlg {
 fn sig_sign(alg: SigAlg, sk: &[u8], msg: &[u8]) -> CResult<Vec<u8>> {
     use signature::Signer;
     Ok(match alg {
+        SigAlg::Ed448 => ed448_signing_key(sk)?.sign_raw(msg).to_bytes().to_vec(),
         SigAlg::Ed25519 => {
             let b: [u8; 32] = sk.try_into().map_err(|_| CryptoError::BadPrivateKey)?;
             ed25519_dalek::SigningKey::from_bytes(&b).sign(msg).to_bytes().to_vec()
@@ -385,6 +392,12 @@ fn sig_verify(alg: SigAlg, pk: &[u8], msg: &[u8], sig: &[u8]) -> CResult<()> {
     use signature::Verifier;
     let bad = |_| CryptoError::BadSignature;
     match alg {
+        SigAlg::Ed448 => {
+            let b: [u8; 57] = pk.try_into().map_err(|_| CryptoError::BadPublicKey)?;
+            let vk = ed448_goldilocks_plus::VerifyingKey::from_bytes(&b).map_err(|_| CryptoError::BadPublicKey)?;
+            let s = ed448_goldilocks_plus::Signature::from_slice(sig).map_err(|_| CryptoError::BadSignature)?;
+            vk.verify_raw(&s, msg).map_err(|_| CryptoError::BadSignature)
+        }
         SigAlg::Ed25519 => {
             let b: [u8; 32] = pk.try_into().map_err(|_| CryptoError::BadPublicKey)?;
             let vk = ed25519_dalek::VerifyingKey::from_bytes(&b).map_err(|_| CryptoError::BadPublicKey)?;
@@ -415,6 +428,7 @@ fn sig_keygen(alg: SigAlg) -> (Vec<u8>, Vec<u8>) {
         SigAlg::EcdsaP256 => p256::SecretKey::random(&mut OsRng).to_bytes().to_vec(),
         SigAlg::EcdsaP384 => p384::SecretKey::random(&mut OsRng).to_bytes().to_vec(),
         SigAlg::EcdsaP521 => p521::SecretKey::random(&mut OsRng).to_bytes().to_vec(),
+        SigAlg::Ed448 => random_bytes(57),
     };
     let pk = sig_public(alg, &sk).expect("fresh key");
     (sk, pk)
@@ -424,6 +438,7 @@ fn sig_public(alg: SigAlg, sk: &[u8]) -> CResult<Vec<u8>> {
     use p256::elliptic_curve::sec1::ToEncodedPoint;
     let e = |_| CryptoError::BadPrivateKey;
     Ok(match alg {
+        SigAlg::Ed448 => ed448_signing_key(sk)?.verifying_key().to_bytes().to_vec(),
         SigAlg::Ed25519 => {
             let b: [u8; 32] = sk.try_into().map_err(|_| CryptoError::BadPrivateKey)?;
             ed25519_dalek::SigningKey::from_bytes(&b).verifying_key().to_bytes().to_vec()
@@ -444,6 +459,7 @@ impl KemAlg {
             KemAlg::P384 => 0x11,
             KemAlg::P521 => 0x12,
             KemAlg::X25519 => 0x20,
+            KemAlg::X448 => 0x21,
         }
     }
     /// The hash used inside the DHKEM.
@@ -452,6 +468,7 @@ impl KemAlg {
             KemAlg::P256 | KemAlg::X25519 => HashAlg::Sha256,
             KemAlg::P384 => HashAlg::Sha384,
             KemAlg::P521 => HashAlg::Sha512,
+            KemAlg::X448 => HashAlg::Sha512,
         }
     }
     pub fn nsecret(self) -> usize {
@@ -462,6 +479,7 @@ impl KemAlg {
             KemAlg::X25519 | KemAlg::P256 => 32,
             KemAlg::P384 => 48,
             KemAlg::P521 => 66,
+            KemAlg::X448 => 56,
         }
     }
     fn suite_id(self) -> Vec<u8> {
@@ -475,6 +493,12 @@ fn kem_public(kem: KemAlg, sk: &[u8]) -> CResult<Vec<u8>> {
     use p256::elliptic_curve::sec1::ToEncodedPoint;
     let e = |_| CryptoError::BadPrivateKey;
     Ok(match kem {
+        KemAlg::X448 => {
+            let s: [u8; 56] = sk.try_into().map_err(|_| CryptoError::BadPrivateKey)?;
+            let mut base = [0u8; 56];
+            base[0] = 5;
+            ed448_goldilocks_plus::x448::x448(s, base).to_vec()
+        }
         KemAlg::X25519 => {
             let b: [u8; 32] = sk.try_into().map_err(|_| CryptoError::BadPrivateKey)?;
             x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(b)).as_bytes().to_vec()
@@ -489,6 +513,15 @@ fn kem_dh(kem: KemAlg, sk: &[u8], pk: &[u8]) -> CResult<Zeroizing<Vec<u8>>> {
     let bp = |_| CryptoError::BadPublicKey;
     let bs = |_| CryptoError::BadPrivateKey;
     Ok(Zeroizing::new(match kem {
+        KemAlg::X448 => {
+            let s: [u8; 56] = sk.try_into().map_err(|_| CryptoError::BadPrivateKey)?;
+            let p: [u8; 56] = pk.try_into().map_err(|_| CryptoError::BadPublicKey)?;
+            let out = ed448_goldilocks_plus::x448::x448(s, p);
+            if out.iter().all(|b| *b == 0) {
+                return Err(CryptoError::ZeroSharedSecret);
+            }
+            out.to_vec()
+        }
         KemAlg::X25519 => {
             let s: [u8; 32] = sk.try_into().map_err(|_| CryptoError::BadPrivateKey)?;
             let p: [u8; 32] = pk.try_into().map_err(|_| CryptoError::BadPublicKey)?;
@@ -562,6 +595,7 @@ impl Hpke {
         let dkp_prk = labeled_extract(h, &sid, &[], "dkp_prk", ikm);
         let sk = match kem {
             KemAlg::X25519 => labeled_expand(h, &sid, &dkp_prk, "sk", &[], 32)?,
+            KemAlg::X448 => labeled_expand(h, &sid, &dkp_prk, "sk", &[], 56)?,
             KemAlg::P256 | KemAlg::P384 | KemAlg::P521 => {
                 let mask = if kem == KemAlg::P521 { 0x01 } else { 0xff };
                 let mut found = None;
@@ -678,4 +712,8 @@ mod tests {
             assert!(cs.verify_with_label(&spk, "L", b"x", &sig).is_err());
         }
     }
+}
+
+fn ed448_signing_key(sk: &[u8]) -> CResult<ed448_goldilocks_plus::SigningKey> {
+    ed448_goldilocks_plus::SigningKey::try_from(sk).map_err(|_| CryptoError::BadPrivateKey)
 }

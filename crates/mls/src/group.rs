@@ -686,18 +686,6 @@ impl Group {
         ks::psk_secret(self.cs, &list)
     }
 
-    fn provisional_context(&self, tree: &RatchetTree) -> GroupContext {
-        GroupContext {
-            version: MLS10,
-            cipher_suite: self.cs,
-            group_id: self.context.group_id.clone(),
-            epoch: self.context.epoch + 1,
-            tree_hash: tree.root_tree_hash(),
-            confirmed_transcript_hash: self.context.confirmed_transcript_hash.clone(),
-            extensions: self.context.extensions.clone(),
-        }
-    }
-
     /// Move `next` (which holds the old epoch's secrets) to the new epoch.
     fn advance(&mut self, ac: &AuthenticatedContent, init_secret: &[u8], commit_secret: Option<&[u8]>, psk_secret: Option<&[u8]>) -> Result<Vec<u8>> {
         let cs = self.cs;
