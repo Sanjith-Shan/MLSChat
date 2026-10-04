@@ -26,6 +26,8 @@ struct State {
     groups: HashMap<u32, Entry>,
     txs: HashMap<u32, (KeyPackageBundle, PskStore)>,
     signers: HashMap<u32, (CipherSuite, Signer)>,
+    /// After a ReInit commit: (old group, ReInit parameters, key package for the new group).
+    reinits: HashMap<u32, (Group, ReInit, KeyPackageBundle)>,
 }
 
 impl State {
@@ -328,29 +330,87 @@ impl MlsClient for Server {
         Ok(Response::new(HandleCommitResponse { state_id: r.state_id, epoch_authenticator: e.group.epoch_authenticator().to_vec() }))
     }
 
-    async fn re_init_proposal(&self, _: Request<ReInitProposalRequest>) -> R<ProposalResponse> {
-        Err(Status::unimplemented("reinit is not implemented in MLSChat"))
+    async fn re_init_proposal(&self, r: Request<ReInitProposalRequest>) -> R<ProposalResponse> {
+        let r = r.into_inner();
+        let cs = suite(r.cipher_suite)?;
+        self.propose(r.state_id, |_| Ok(Proposal::ReInit(ReInit { group_id: r.group_id.clone(), version: MLS10, cipher_suite: cs, extensions: exts(&r.extensions) })))
     }
-    async fn re_init_commit(&self, _: Request<CommitRequest>) -> R<CommitResponse> {
-        Err(Status::unimplemented("reinit is not implemented in MLSChat"))
+
+    async fn re_init_commit(&self, r: Request<CommitRequest>) -> R<CommitResponse> {
+        self.commit(r).await
     }
-    async fn handle_pending_re_init_commit(&self, _: Request<HandlePendingCommitRequest>) -> R<HandleReInitCommitResponse> {
-        Err(Status::unimplemented("reinit is not implemented in MLSChat"))
+
+    async fn handle_pending_re_init_commit(&self, r: Request<HandlePendingCommitRequest>) -> R<HandleReInitCommitResponse> {
+        let r = r.into_inner();
+        let mut st = self.st.lock().unwrap();
+        let e = entry!(st, r.state_id);
+        e.group.merge_pending_commit().map_err(err)?;
+        Self::finish_reinit(&mut st, r.state_id)
     }
-    async fn handle_re_init_commit(&self, _: Request<HandleCommitRequest>) -> R<HandleReInitCommitResponse> {
-        Err(Status::unimplemented("reinit is not implemented in MLSChat"))
+
+    async fn handle_re_init_commit(&self, r: Request<HandleCommitRequest>) -> R<HandleReInitCommitResponse> {
+        let r = r.into_inner();
+        let mut st = self.st.lock().unwrap();
+        let e = entry!(st, r.state_id);
+        take_proposals(e, &r.proposal)?;
+        let m = MlsMessage::from_bytes(&r.commit).map_err(err)?;
+        e.group.process(&m).map_err(err)?;
+        Self::finish_reinit(&mut st, r.state_id)
     }
-    async fn re_init_welcome(&self, _: Request<ReInitWelcomeRequest>) -> R<CreateSubgroupResponse> {
-        Err(Status::unimplemented("reinit is not implemented in MLSChat"))
+
+    async fn re_init_welcome(&self, r: Request<ReInitWelcomeRequest>) -> R<CreateSubgroupResponse> {
+        let r = r.into_inner();
+        let mut st = self.st.lock().unwrap();
+        let (old, params, kpb) = st.reinits.get(&r.reinit_id).cloned().ok_or_else(|| Status::invalid_argument("unknown reinit"))?;
+        let cs = params.cipher_suite;
+        let leaf = kpb.key_package.leaf_node.clone();
+        let mut g = Group::create_with_leaf(cs, kpb.signer.clone(), params.group_id.clone(), params.extensions.clone(), config(old.config.encrypt_handshake), leaf, kpb.encryption_priv.clone())
+            .map_err(err)?;
+        g.psks = old.psks.clone();
+        let psk = PreSharedKeyId {
+            psk: Psk::Resumption { usage: ResumptionPskUsage::Reinit, psk_group_id: old.group_id().to_vec(), psk_epoch: old.epoch() },
+            psk_nonce: mls::crypto::random_bytes(cs.nh()),
+        };
+        Self::subgroup(&mut st, g, psk, &r.key_package, r.force_path, r.external_tree)
     }
-    async fn handle_re_init_welcome(&self, _: Request<HandleReInitWelcomeRequest>) -> R<JoinGroupResponse> {
-        Err(Status::unimplemented("reinit is not implemented in MLSChat"))
+
+    async fn handle_re_init_welcome(&self, r: Request<HandleReInitWelcomeRequest>) -> R<JoinGroupResponse> {
+        let r = r.into_inner();
+        let mut st = self.st.lock().unwrap();
+        let (old, params, kpb) = st.reinits.get(&r.reinit_id).cloned().ok_or_else(|| Status::invalid_argument("unknown reinit"))?;
+        let MlsMessage::Welcome(w) = MlsMessage::from_bytes(&r.welcome).map_err(err)? else { return Err(Status::invalid_argument("not a welcome")) };
+        let g = Group::join(&w, &kpb, tree_opt(params.cipher_suite, &r.ratchet_tree)?, old.psks.clone(), config(old.config.encrypt_handshake)).map_err(err)?;
+        let ea = g.epoch_authenticator().to_vec();
+        let id = st.id();
+        st.groups.insert(id, Entry { group: g, own: HashMap::new() });
+        Ok(Response::new(JoinGroupResponse { state_id: id, epoch_authenticator: ea }))
     }
-    async fn create_branch(&self, _: Request<CreateBranchRequest>) -> R<CreateSubgroupResponse> {
-        Err(Status::unimplemented("branch is not implemented in MLSChat"))
+
+    async fn create_branch(&self, r: Request<CreateBranchRequest>) -> R<CreateSubgroupResponse> {
+        let r = r.into_inner();
+        let mut st = self.st.lock().unwrap();
+        let old = entry!(st, r.state_id).group.clone();
+        let cs = old.cs;
+        let mut g = Group::create(cs, old.signer().clone(), r.group_id.clone(), exts(&r.extensions), config(old.config.encrypt_handshake)).map_err(err)?;
+        g.psks = old.psks.clone();
+        let psk = PreSharedKeyId {
+            psk: Psk::Resumption { usage: ResumptionPskUsage::Branch, psk_group_id: old.group_id().to_vec(), psk_epoch: old.epoch() },
+            psk_nonce: mls::crypto::random_bytes(cs.nh()),
+        };
+        Self::subgroup(&mut st, g, psk, &r.key_packages, r.force_path, r.external_tree)
     }
-    async fn handle_branch(&self, _: Request<HandleBranchRequest>) -> R<HandleBranchResponse> {
-        Err(Status::unimplemented("branch is not implemented in MLSChat"))
+
+    async fn handle_branch(&self, r: Request<HandleBranchRequest>) -> R<HandleBranchResponse> {
+        let r = r.into_inner();
+        let mut st = self.st.lock().unwrap();
+        let old = entry!(st, r.state_id).group.clone();
+        let (kpb, _) = st.txs.get(&r.transaction_id).cloned().ok_or_else(|| Status::invalid_argument("unknown transaction"))?;
+        let MlsMessage::Welcome(w) = MlsMessage::from_bytes(&r.welcome).map_err(err)? else { return Err(Status::invalid_argument("not a welcome")) };
+        let g = Group::join(&w, &kpb, tree_opt(old.cs, &r.ratchet_tree)?, old.psks.clone(), config(old.config.encrypt_handshake)).map_err(err)?;
+        let ea = g.epoch_authenticator().to_vec();
+        let id = st.id();
+        st.groups.insert(id, Entry { group: g, own: HashMap::new() });
+        Ok(Response::new(HandleBranchResponse { state_id: id, epoch_authenticator: ea }))
     }
 
     async fn new_member_add_proposal(&self, r: Request<NewMemberAddProposalRequest>) -> R<NewMemberAddProposalResponse> {
@@ -415,6 +475,11 @@ impl MlsClient for Server {
             "remove" => Proposal::Remove(tree.find_leaf(|l| l.credential.identity() == d.removed_id.as_slice()).ok_or_else(|| Status::invalid_argument("no such member"))?),
             "externalPSK" => Proposal::PreSharedKey(psk_id_external(cs, &d.psk_id)),
             "groupContextExtensions" => Proposal::GroupContextExtensions(exts(&d.extensions)),
+            "resumptionPSK" => Proposal::PreSharedKey(PreSharedKeyId {
+                psk: Psk::Resumption { usage: ResumptionPskUsage::Application, psk_group_id: ctx.group_id.clone(), psk_epoch: d.epoch_id },
+                psk_nonce: mls::crypto::random_bytes(cs.nh()),
+            }),
+            "reinit" => Proposal::ReInit(ReInit { group_id: d.group_id.clone(), version: MLS10, cipher_suite: suite(d.cipher_suite)?, extensions: exts(&d.extensions) }),
             other => return Err(Status::unimplemented(format!("external {other} proposal"))),
         };
         let m = external_proposal(cs, ctx, r.signer_index, &signer.signature_priv, p).map_err(err)?;
@@ -451,4 +516,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("mlschat-interop listening on {addr}");
     tonic::transport::Server::builder().add_service(MlsClientServer::new(Server::default())).serve(addr).await?;
     Ok(())
+}
+
+impl Server {
+    /// After a ReInit commit: remember the old group and make a key package for the new one.
+    fn finish_reinit(st: &mut State, state_id: u32) -> R<HandleReInitCommitResponse> {
+        let e = entry!(st, state_id);
+        let old = e.group.clone();
+        let params = old.pending_reinit().cloned().ok_or_else(|| Status::failed_precondition("commit did not carry a ReInit"))?;
+        let identity = old.signer().credential.identity().to_vec();
+        let kpb = create_key_package(params.cipher_suite, &Signer::generate(params.cipher_suite, &identity)).map_err(err)?;
+        let ea = old.epoch_authenticator().to_vec();
+        let kp = MlsMessage::KeyPackage(kpb.key_package.clone()).to_bytes();
+        let id = st.id();
+        st.reinits.insert(id, (old, params, kpb));
+        Ok(Response::new(HandleReInitCommitResponse { reinit_id: id, key_package: kp, epoch_authenticator: ea }))
+    }
+
+    /// First commit of a reinitialized or branched group: add everyone with a resumption PSK.
+    fn subgroup(st: &mut State, mut g: Group, psk: PreSharedKeyId, kps: &[Vec<u8>], force_path: bool, external_tree: bool) -> R<CreateSubgroupResponse> {
+        let mut props = vec![Proposal::PreSharedKey(psk)];
+        for b in kps {
+            match MlsMessage::from_bytes(b).map_err(err)? {
+                MlsMessage::KeyPackage(kp) => props.push(Proposal::Add(kp)),
+                _ => return Err(Status::invalid_argument("not a key package")),
+            }
+        }
+        g.config.ratchet_tree_extension = !external_tree;
+        let out = g.commit(props, CommitOptions { force_path, ..Default::default() }).map_err(err)?;
+        g.merge_pending_commit().map_err(err)?;
+        g.config.ratchet_tree_extension = true;
+        let tree = if external_tree { g.tree().to_bytes() } else { vec![] };
+        let ea = g.epoch_authenticator().to_vec();
+        let id = st.id();
+        st.groups.insert(id, Entry { group: g, own: HashMap::new() });
+        Ok(Response::new(CreateSubgroupResponse { state_id: id, welcome: out.welcome.map(|w| w.to_bytes()).unwrap_or_default(), ratchet_tree: tree, epoch_authenticator: ea }))
+    }
 }

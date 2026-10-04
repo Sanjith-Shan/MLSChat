@@ -21,9 +21,9 @@ Recorded from the running app.</em></p>
 | --- | --- | --- |
 | Conformance | **785 of 785** official test-vector cases pass, all **16** vector files, all **7** cipher suites, nothing skipped | `results/exp5_conformance.jsonl` |
 | Differential | **300 of 300** randomized sessions mixing MLSChat and OpenMLS members agree on every one of **9,816** epochs | `results/exp5_conformance.jsonl` |
-| Remove a member, 10,000-member group | **4.6 ms** for the committer and **2.5 KB** on the wire, against **86 s** of total device CPU and **8.8 GB** for Sender Keys to re-key every sender | `results/exp1_membership.jsonl` |
+| Remove a member, 10,000-member group | **4.6 ms** for the committer and **2.5 KB** on the wire, against **95 s** of total device CPU and **8.8 GB** for Sender Keys to re-key every sender | `results/exp1_membership.jsonl` |
 | Concurrent commits | **0 of 200** trials fork with epoch fencing; without it, every concurrent add strands its newcomer (100 of 100) | `results/exp3_concurrency.jsonl` |
-| Chaos | **0** lost, duplicated or reordered of **496,800** deliveries (34,400 messages) through **123** server SIGKILLs and dropped connections | `results/exp4_chaos.jsonl` |
+| Chaos | **0** lost, duplicated or reordered of **513,600** deliveries (36,800 messages) through **123** server SIGKILLs and 755 dropped connections | `results/exp4_chaos.jsonl` |
 | Model check | TLC proves no fork and "an ack means applied" for the fenced design and finds counterexamples for three unfenced ones | `results/model_check.jsonl` |
 
 Every number, with its conditions and caveats, is in [`NUMBERS.md`](NUMBERS.md).

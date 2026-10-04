@@ -41,10 +41,19 @@ impl RatchetTree {
         if list.len() % 2 == 0 {
             return proto("ratchet tree has an even number of nodes");
         }
+        if list.len() > (1 << 30) {
+            return proto("ratchet tree too large");
+        }
         for (i, n) in list.iter().enumerate() {
             match n {
                 Some(Node::Leaf(_)) if i % 2 == 1 => return proto("leaf node at a parent position"),
                 Some(Node::Parent(_)) if i % 2 == 0 => return proto("parent node at a leaf position"),
+                // Unmerged leaves come from the sender. An out-of-range index overflowed
+                // leaf-to-node math (found by cargo-fuzz), so reject anything outside
+                // this parent's subtree before any other code sees it.
+                Some(Node::Parent(p)) if p.unmerged_leaves.iter().any(|u| !tm::leaves_under(i as u32).contains(u)) => {
+                    return proto("unmerged leaf outside its parent's subtree")
+                }
                 _ => {}
             }
         }
