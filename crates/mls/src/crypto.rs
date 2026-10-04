@@ -588,6 +588,12 @@ impl Hpke {
     }
 
     fn key_schedule(&self, shared_secret: &[u8], info: &[u8]) -> CResult<(Vec<u8>, Vec<u8>)> {
+        let (key, nonce, _) = self.key_schedule_full(shared_secret, info)?;
+        Ok((key, nonce))
+    }
+
+    /// Returns (key, base_nonce, exporter_secret).
+    fn key_schedule_full(&self, shared_secret: &[u8], info: &[u8]) -> CResult<(Vec<u8>, Vec<u8>, Vec<u8>)> {
         let sid = self.suite_id();
         let h = self.kdf;
         let psk_id_hash = labeled_extract(h, &sid, &[], "psk_id_hash", &[]);
@@ -598,7 +604,36 @@ impl Hpke {
         let secret = labeled_extract(h, &sid, shared_secret, "secret", &[]);
         let key = labeled_expand(h, &sid, &secret, "key", &ctx, self.aead.nk())?;
         let nonce = labeled_expand(h, &sid, &secret, "base_nonce", &ctx, 12)?;
-        Ok((key, nonce))
+        let exp = labeled_expand(h, &sid, &secret, "exp", &ctx, h.len())?;
+        Ok((key, nonce, exp))
+    }
+
+    fn export_from(&self, exporter_secret: &[u8], exporter_context: &[u8], len: usize) -> CResult<Vec<u8>> {
+        labeled_expand(self.kdf, &self.suite_id(), exporter_secret, "sec", exporter_context, len)
+    }
+
+    /// SetupBaseS followed by Export. Returns `(enc, exported_secret)`.
+    pub fn send_export(&self, pk_r: &[u8], info: &[u8], exporter_context: &[u8], len: usize) -> CResult<(Vec<u8>, Vec<u8>)> {
+        let mut ikm = Zeroizing::new(vec![0u8; self.kem.nsk()]);
+        OsRng.fill_bytes(&mut ikm);
+        let (sk_e, pk_e) = self.derive_keypair(&ikm)?;
+        let dh = kem_dh(self.kem, &sk_e, pk_r)?;
+        let mut kem_context = pk_e.clone();
+        kem_context.extend_from_slice(pk_r);
+        let ss = Zeroizing::new(self.extract_and_expand(&dh, &kem_context)?);
+        let (_, _, exp) = self.key_schedule_full(&ss, info)?;
+        Ok((pk_e, self.export_from(&exp, exporter_context, len)?))
+    }
+
+    /// SetupBaseR followed by Export.
+    pub fn receive_export(&self, sk_r: &[u8], enc: &[u8], info: &[u8], exporter_context: &[u8], len: usize) -> CResult<Vec<u8>> {
+        let dh = kem_dh(self.kem, sk_r, enc)?;
+        let pk_r = kem_public(self.kem, sk_r)?;
+        let mut kem_context = enc.to_vec();
+        kem_context.extend_from_slice(&pk_r);
+        let ss = Zeroizing::new(self.extract_and_expand(&dh, &kem_context)?);
+        let (_, _, exp) = self.key_schedule_full(&ss, info)?;
+        self.export_from(&exp, exporter_context, len)
     }
 
     /// Single-shot SealBase. Returns `(enc, ciphertext)`.

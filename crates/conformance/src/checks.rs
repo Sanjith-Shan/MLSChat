@@ -1,6 +1,9 @@
 use crate::*;
 use mls::codec::{read_varint, Reader};
 use mls::tree_math as tm;
+use mls::messages::*;
+use mls::Codec;
+use crate::{groupchecks, schedule, treechecks};
 
 pub type CheckFn = fn(&Value) -> Result<Outcome>;
 
@@ -8,6 +11,19 @@ pub static FILES: &[(&str, CheckFn)] = &[
     ("tree-math.json", tree_math),
     ("crypto-basics.json", crypto_basics),
     ("deserialization.json", deserialization),
+    ("messages.json", messages),
+    ("key-schedule.json", schedule::key_schedule),
+    ("psk_secret.json", schedule::psk_secret),
+    ("secret-tree.json", schedule::secret_tree),
+    ("transcript-hashes.json", schedule::transcript_hashes),
+    ("message-protection.json", schedule::message_protection),
+    ("tree-validation.json", treechecks::tree_validation),
+    ("tree-operations.json", treechecks::tree_operations),
+    ("treekem.json", treechecks::treekem),
+    ("welcome.json", groupchecks::welcome),
+    ("passive-client-welcome.json", groupchecks::passive),
+    ("passive-client-handling-commit.json", groupchecks::passive),
+    ("passive-client-random.json", groupchecks::passive),
 ];
 
 fn opt_u32_array(v: &Value, k: &str) -> Result<Vec<Option<u32>>> {
@@ -76,5 +92,49 @@ fn deserialization(v: &Value) -> Result<Outcome> {
     let len = read_varint(&mut r)?;
     ensure!(r.is_empty(), "header has trailing bytes");
     ensure!(len as u64 == num(v, "length")?, "length {len}");
+    Ok(Outcome::Pass)
+}
+
+fn roundtrip<T: Codec>(v: &Value, k: &str) -> Result<T> {
+    let b = hx(v, k)?;
+    let x = T::from_bytes(&b).with_context(|| format!("decoding {k}"))?;
+    eqb(k, &x.to_bytes(), &b)?;
+    Ok(x)
+}
+
+fn messages(v: &Value) -> Result<Outcome> {
+    let want = [
+        ("mls_welcome", WireFormat::Welcome),
+        ("mls_group_info", WireFormat::GroupInfo),
+        ("mls_key_package", WireFormat::KeyPackage),
+        ("public_message_application", WireFormat::PublicMessage),
+        ("public_message_proposal", WireFormat::PublicMessage),
+        ("public_message_commit", WireFormat::PublicMessage),
+        ("private_message", WireFormat::PrivateMessage),
+    ];
+    for (k, wf) in want {
+        let m: MlsMessage = roundtrip(v, k)?;
+        ensure!(m.wire_format() == wf, "{k}: wrong wire format");
+    }
+    let ct = |k: &str, t: ContentType| -> Result<()> {
+        match MlsMessage::from_bytes(&hx(v, k)?)? {
+            MlsMessage::Public(p) => ensure!(p.content.content.content_type() == t, "{k}: wrong content type"),
+            _ => bail!("{k}: not public"),
+        }
+        Ok(())
+    };
+    ct("public_message_application", ContentType::Application)?;
+    ct("public_message_proposal", ContentType::Proposal)?;
+    ct("public_message_commit", ContentType::Commit)?;
+    roundtrip::<RatchetTreeNodes>(v, "ratchet_tree")?;
+    roundtrip::<GroupSecrets>(v, "group_secrets")?;
+    roundtrip::<KeyPackage>(v, "add_proposal")?;
+    roundtrip::<LeafNode>(v, "update_proposal")?;
+    roundtrip::<u32>(v, "remove_proposal")?;
+    roundtrip::<PreSharedKeyId>(v, "pre_shared_key_proposal")?;
+    roundtrip::<ReInit>(v, "re_init_proposal")?;
+    roundtrip::<Vec<u8>>(v, "external_init_proposal")?;
+    roundtrip::<Vec<Extension>>(v, "group_context_extensions_proposal")?;
+    roundtrip::<Commit>(v, "commit")?;
     Ok(Outcome::Pass)
 }

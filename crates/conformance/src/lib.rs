@@ -6,6 +6,9 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 mod checks;
+mod schedule;
+mod treechecks;
+mod groupchecks;
 
 pub use checks::FILES;
 
