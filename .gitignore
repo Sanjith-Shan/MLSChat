@@ -1,0 +1,13 @@
+target/
+**/target/
+vectors/
+corpus/
+artifacts/
+*.profraw
+node_modules/
+/web/pkg/
+.minipc-busy
+.minipc-runs/
+*.sst
+/data/
+BUILD_BRIEF.md

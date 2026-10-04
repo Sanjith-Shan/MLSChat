@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/mls", "crates/conformance"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[profile.release]
+debug = 1
+
+[profile.bench]
+debug = 1

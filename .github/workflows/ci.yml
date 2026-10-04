@@ -1,0 +1,22 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    env:
+      MLS_WORK: ${{ github.workspace }}/../mlschat-work
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install clang (bundled RocksDB build)
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+      - name: Fetch pinned test vectors
+        run: |
+          mkdir -p "$MLS_WORK"
+          git clone -q https://github.com/mlswg/mls-implementations.git "$MLS_WORK/mls-implementations"
+          git -C "$MLS_WORK/mls-implementations" checkout -q cfd450286d1bfd9cd2519b95c80f9771f94a5b1a
+      - name: Test
+        run: cargo test --workspace --release
+      - name: Vector pass counts
+        run: cargo run --release -p conformance --bin mls-conformance
