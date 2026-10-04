@@ -58,6 +58,20 @@ another commit wins the epoch. This is the client half of epoch fencing.
 **Past epochs.** A member keeps the secret tree and the (shared-node) public tree of the last
 two epochs, so an application message encrypted just before a commit still decrypts after it.
 
+**Untrusted input.** A ratchet tree arrives in a Welcome or GroupInfo, so it is attacker
+controlled. `RatchetTree::from_nodes` rejects structural problems before any other code sees the
+tree: node types at the wrong positions, a trailing blank, an even node count, and unmerged leaves
+outside their parent's subtree (cargo-fuzz found the last one as an integer overflow, bug 12).
+
+**Key package lifetimes.** Key packages carry now - 1 h to now + 84 days. RFC 9420 section 10.1
+requires an application-defined maximum lifetime; a group can enforce one with
+`GroupConfig::max_lifetime_range`. It is off by default because the official vectors use unbounded
+lifetimes. OpenMLS has the same gap (`docs/upstream.md`).
+
+**ReInit and branch.** Both are implemented through the PSK machinery: the new group's first
+commit adds everyone and carries a resumption PSK (usage `reinit` or `branch`) from the old group,
+which every joiner must hold to decrypt the Welcome. The interop harness exercises both.
+
 **What is left out.** Lifetime checks against the clock are skipped (no trusted time source is
 assumed). X.509 credentials are parsed but not validated. Custom proposals and extensions beyond
 RFC 9420's five are carried but not interpreted.
@@ -80,9 +94,18 @@ MLS assumes a delivery service that gives every member the same order of commits
    are buffered, already-applied ones dropped, gaps filled by `Fetch` from its position.
    Welcomes go to a per-device inbox with the log position the joiner should start from.
 
+5. **Per-sender order.** Application messages carry the sender's sequence number for the group;
+   the server accepts only the next one and answers `OutOfOrder` with the number it expects. A
+   message rejected as too old (built on an epoch the server no longer accepts) is re-encrypted
+   with the same number once the client has caught up. Without this, exp4 delivered 16 messages
+   out of their sender's order (bug 8).
+
 Writes use `sync = true` (the WAL is fsynced before the ack). One write batch per accepted
-message covers the log entry, the group's epoch and membership, the dedupe record and any
-Welcomes, so a crash can never leave half an accept on disk.
+message covers the log entry, the group's epoch, membership and per-sender sequence, the dedupe
+record and any Welcomes, so a crash can never leave half an accept on disk. The write runs under
+`block_in_place`: on this VM an fsync takes about 3.8 ms, and doing it inline on one of Tokio's
+worker threads stalled every connection on that thread (bug 9). Cursor acks are not fsynced;
+losing one only costs a re-fetch.
 
 **Why fencing and not just ordering.** The TLA+ model (`docs/tla/`) separates the two. With an
 ordered log and clients that apply strictly in log order and skip stale commits, members never
@@ -109,6 +132,19 @@ updates it from the add/remove lists that the committer attaches to an accepted 
 is trusted metadata: a malicious member could lie about it and starve someone of fan-out. It
 cannot add a reader, because reading needs the MLS group secrets. RFC 9750 section 5.3 discusses
 the same trade-off.
+
+## How correctness is checked
+
+| Layer | Check | Where |
+| --- | --- | --- |
+| Crypto, framing, tree, key schedule, group | The 16 official vector files, all 7 suites, 785 cases | `crates/conformance` |
+| Whole protocol against another implementation | Randomized mixed MLSChat/OpenMLS groups, 300 sessions | `crates/differential` |
+| Wire-level interoperability | The working group's gRPC interop harness with OpenMLS | `crates/interop`, `scripts/interop.sh` |
+| Group behaviour | Unit and property tests (random adds, removes, updates) | `crates/mls/tests` |
+| Delivery guarantees | Property test: random disconnects, server crashes, concurrent commits | `crates/client/tests` |
+| Commit ordering design | TLA+ model, checked with TLC | `docs/tla` |
+| Decoders and message processing | cargo-fuzz, four targets | `fuzz/` |
+| Under failure | exp4 chaos with SIGKILLed server process | `crates/experiments` |
 
 ## Baselines
 

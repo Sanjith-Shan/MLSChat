@@ -19,7 +19,7 @@ and the fix was committed right after (see `BUG_LOG.md`).
 | Vector files where every case passes | **16 of 16** | same |
 | Cipher suites covered | **7 of 7** (1 to 7) | same |
 | Vector repository commit | `cfd450286d1bfd9cd2519b95c80f9771f94a5b1a` | same |
-| Passive-client epochs replayed | 330 epochs, 1,602 proposals on the implemented suites (200 epochs and 1,542 proposals in `passive-client-random` alone) | counted from the vector files; each epoch's authenticator is compared |
+| Passive-client cases replayed | 148 cases (56 Welcome-only), 382 epochs, 1,626 proposals across all seven suites (200 epochs and 1,542 proposals in `passive-client-random` alone) | counted from the vector files; each epoch's authenticator is compared |
 | OpenMLS differential sessions that agree | **300 of 300** (100 per suite, suites 1 to 3, 40 random operations each) | `results/exp5_conformance.jsonl` (`exp5_openmls_differential`) |
 | Epochs checked across those sessions | **9,816** (4,983 commits by MLSChat members, 4,833 by OpenMLS members) | same |
 | Application messages decrypted across implementations | 2,184 | same |
@@ -34,13 +34,29 @@ The official `mls-implementations` gRPC test-runner drove MLSChat and OpenMLS (m
 together: every script, every assignment of the two implementations to the actors, every suite
 both support plus suites 4 to 7 with MLSChat alone, and both handshake modes.
 
-| Config | Runs passed | Runs mixing both implementations | Source |
-| --- | --- | --- | --- |
-| welcome_join | 128 / 128 | 48 / 48 | `results/interop.jsonl` |
-| commit | 2,688 / 2,688 | 2,400 / 2,400 | same |
-| application | 96 / 96 | 36 / 36 | same |
-| external_join | 328 / 328 | 228 / 228 | same |
-| external_proposals, reinit, branch, deep_random | see `results/interop.jsonl` | | same |
+| Config | Runs passed | Runs mixing both implementations | MLSChat-only runs | Source |
+| --- | --- | --- | --- | --- |
+| welcome_join | 128 / 128 | 48 / 48 | 56 / 56 | `results/interop.jsonl` (raw runner output kept) |
+| commit | 2,688 / 2,688 | 2,400 / 2,400 | 102 / 102 | same, console summary (see note) |
+| application | 96 / 96 | 36 / 36 | 42 / 42 | same, console summary |
+| external_join | 328 / 328 | 228 / 228 | 64 / 64 | same, console summary |
+| external_proposals | 744 / 856 | 612 / 696 | 54 / 70 | same, console summary |
+| reinit | 48 / 1,200 | 0 / 1,080 | 48 / 48 | same, console summary |
+| branch, deep_random | not completed | | | |
+
+Notes, stated plainly:
+- Only the `welcome_join` line was written from raw runner output that still exists. The other
+  lines are the summaries `scripts/interop_summary.py` printed during earlier runs. Their raw JSON
+  was deleted when I cleared the output directory for a full rerun, and that rerun, like every
+  later attempt, froze the shared WSL VM, so it was not repeated. Each line says so in its
+  `source` field.
+- The `external_proposals` failures were external ReInit proposals (OpenMLS reports them
+  unsupported) and external resumption-PSK proposals, which MLSChat did not support at the time.
+  Support was added afterwards but not rerun.
+- `reinit`: every run that needs OpenMLS fails at OpenMLS ("Re-init is not implemented"); the 48
+  MLSChat-only runs across all seven suites pass.
+- `branch` and `deep_random` never completed. The first `deep_random` attempt was OOM-killed in
+  the Go runner (4 GB of transcripts); the later attempts were lost to VM freezes.
 
 ## Membership cost (exp1)
 
@@ -161,7 +177,7 @@ cargo-fuzz with libFuzzer and AddressSanitizer, 10 minutes per target, seeded fr
 | `mls_message` (decode and canonical re-encode) | 11.7 million | 0 | run log, `BUG_LOG.md` |
 | `wire_frames` (server protocol) | 24.4 million | 0 | same |
 | `group_process` (a member processing arbitrary messages) | 35.9 million | 0 | same |
-| `ratchet_tree` (received trees) | 97,762 before the crash in bug 12 | 1, fixed | same |
+| `ratchet_tree` (received trees) | 97,762 before the crash in bug 12 | 1, fixed | same; the crashing input is a regression test, but the target was not re-fuzzed after the fix because the VM froze under load |
 
 ## Demo
 

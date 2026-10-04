@@ -21,6 +21,7 @@ Recorded from the running app.</em></p>
 | --- | --- | --- |
 | Conformance | **785 of 785** official test-vector cases pass, all **16** vector files, all **7** cipher suites, nothing skipped | `results/exp5_conformance.jsonl` |
 | Differential | **300 of 300** randomized sessions mixing MLSChat and OpenMLS members agree on every one of **9,816** epochs | `results/exp5_conformance.jsonl` |
+| Interop harness | the working group's own gRPC test-runner drove MLSChat with OpenMLS: **2,400 of 2,400** mixed `commit` runs and every mixed `welcome_join`, `application` and `external_join` run pass | `results/interop.jsonl` |
 | Remove a member, 10,000-member group | **4.6 ms** for the committer and **2.5 KB** on the wire, against **95 s** of total device CPU and **8.8 GB** for Sender Keys to re-key every sender | `results/exp1_membership.jsonl` |
 | Concurrent commits | **0 of 200** trials fork with epoch fencing; without it, every concurrent add strands its newcomer (100 of 100) | `results/exp3_concurrency.jsonl` |
 | Chaos | **0** lost, duplicated or reordered of **513,600** deliveries (36,800 messages) through **123** server SIGKILLs and 755 dropped connections | `results/exp4_chaos.jsonl` |
@@ -97,7 +98,7 @@ and load recorded on every line.
 - Credentials are bare identities; there is no identity verification or key transparency.
 - The server trusts the committer's list of added and removed devices for fan-out (it cannot add
   a reader, but a malicious member could starve someone of messages).
-- ReInit and branch are parsed and validated but not offered as operations.
+- ReInit and branch exist for the interop harness; the chat client and server do not expose them.
 - One process, one RocksDB; no replication. A disk loss loses the log.
 
 ## Credits

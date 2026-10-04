@@ -508,11 +508,15 @@ impl Server {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut port = 50052u16;
+    let mut host = "127.0.0.1".to_string();
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--port") {
         port = args[i + 1].parse()?;
     }
-    let addr = format!("[::1]:{port}").parse()?;
+    if let Some(i) = args.iter().position(|a| a == "--host") {
+        host = args[i + 1].clone();
+    }
+    let addr = format!("{host}:{port}").parse()?;
     println!("mlschat-interop listening on {addr}");
     tonic::transport::Server::builder().add_service(MlsClientServer::new(Server::default())).serve(addr).await?;
     Ok(())
