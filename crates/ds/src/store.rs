@@ -164,8 +164,9 @@ impl Store {
         Ok(out)
     }
 
+    /// Cursors are advisory (a lost one only causes a re-fetch), so they are not fsynced.
     pub fn set_cursor(&self, client: &[u8], g: &[u8], seq: u64) -> anyhow::Result<()> {
-        self.db.put_cf_opt(self.cf(CF_CURSOR), pair_key(client, g), seq.to_be_bytes(), &self.wopts())?;
+        self.db.put_cf(self.cf(CF_CURSOR), pair_key(client, g), seq.to_be_bytes())?;
         Ok(())
     }
 

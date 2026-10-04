@@ -87,7 +87,7 @@ class Device {
     if (g) {
       this.group = g.group;
       meta.innerHTML = g.removed ? `<b>${g.group}</b>: removed` :
-        `<b>${g.group}</b> epoch <b>${g.epoch}</b> · ${g.members.length} members · authenticator <code>${g.epoch_authenticator}</code>`;
+        `<b>${g.group}</b> epoch <b>${g.epoch}</b> · ${g.members.length} member${g.members.length === 1 ? "" : "s"} · authenticator <code>${g.epoch_authenticator}</code>`;
       members.innerHTML = '';
       for (const m of g.members) {
         const c = document.createElement('span');
@@ -157,6 +157,8 @@ document.getElementById('add-device').onclick = () => {
 };
 
 const initial = (params.get('devices') || 'alice,bob,carol').split(',');
+setInterval(() => { for (const d of devices.values()) { d.client.tick(); d.flush(); } }, 300);
+
 const tag = Math.random().toString(36).slice(2, 6);
 for (const d of initial) addDevice(params.has('demo') ? `${d}-${tag}` : d);
 
@@ -173,7 +175,7 @@ if (params.has('demo')) {
     () => { b.client.rotate(room); b.flush(); },
     () => { a.client.remove(room, c.id); a.flush(); },
     () => { a.client.send_text(room, 'carol is out: a new epoch she has no keys for'); a.flush(); },
-    () => { b.client.send_text(room, 'only the path from the removed leaf to the root was re-keyed'); b.flush(); },
+    () => { b.client.send_text(room, 'her old keys open nothing in this epoch'); b.flush(); },
   ];
   const upto = Math.min(Number(params.get('step') || steps.length), steps.length);
   const delay = Number(params.get('delay') || 1400);

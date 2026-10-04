@@ -269,3 +269,21 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn key_package_lifetime_bound_is_enforced_when_configured() {
+    use mls::messages::{LeafNodeSource, Lifetime};
+    let cfg = GroupConfig { max_lifetime_range: Some(mls::group::MAX_LIFETIME_RANGE_SECS), ..Default::default() };
+    let mut g = Group::create(CS, Signer::generate(CS, b"a"), b"g".to_vec(), vec![], cfg).unwrap();
+    // A normal key package (84 days) is accepted.
+    let ok = create_key_package(CS, &Signer::generate(CS, b"b")).unwrap();
+    g.commit(vec![Proposal::Add(ok.key_package)], CommitOptions::default()).unwrap();
+    g.clear_pending_commit();
+    // One that claims to be valid forever is rejected.
+    let signer = Signer::generate(CS, b"c");
+    let mut kpb = create_key_package(CS, &signer).unwrap();
+    kpb.key_package.leaf_node.leaf_node_source = LeafNodeSource::KeyPackage(Lifetime { not_before: 0, not_after: u64::MAX });
+    kpb.key_package.leaf_node.sign(CS, &signer.signature_priv, None).unwrap();
+    kpb.key_package.signature = CS.sign_with_label(&signer.signature_priv, "KeyPackageTBS", &kpb.key_package.tbs()).unwrap();
+    assert!(g.commit(vec![Proposal::Add(kpb.key_package)], CommitOptions::default()).is_err());
+}

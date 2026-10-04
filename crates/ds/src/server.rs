@@ -322,7 +322,11 @@ impl Server {
         }
         let delivery = Delivery { group_id: req.group_id.clone(), seq, sender: me.clone(), kind: header.kind, epoch: header.epoch, msg_id: req.msg_id.clone(), payload: req.payload };
         let inbox_seqs: Vec<(ClientId, u64)> = welcomes.iter().map(|(w, _)| Ok((w.clone(), self.store.inbox_next(w)?))).collect::<anyhow::Result<_>>()?;
-        self.store.accept(Accept { delivery: &delivery, meta: &next, dedupe: self.config.idempotent, welcomes: welcomes.clone() })?;
+        // The durable append fsyncs. Doing it inline on a Tokio worker stalled every
+        // connection on that thread (the load test caught it); block_in_place hands
+        // the worker's other tasks off, and concurrent writers share RocksDB's
+        // group-commit fsync.
+        tokio::task::block_in_place(|| self.store.accept(Accept { delivery: &delivery, meta: &next, dedupe: self.config.idempotent, welcomes: welcomes.clone() }))?;
         *meta = next;
         self.stats.accepted.fetch_add(1, Ordering::Relaxed);
 

@@ -46,6 +46,8 @@ pub struct Received {
     pub sender: ClientId,
     pub epoch: u64,
     pub plaintext: Vec<u8>,
+    /// When the message was decrypted (for latency measurement).
+    pub at: Instant,
 }
 
 /// Something the client noticed that a test or UI may want to see.
@@ -481,7 +483,7 @@ impl Client {
         }
         match st.group.process(&msg) {
             Ok(Processed::Application { data, epoch, .. }) => {
-                events.push_back(Event::Message(Received { group_id: d.group_id, seq: d.seq, sender: d.sender, epoch, plaintext: data }));
+                events.push_back(Event::Message(Received { group_id: d.group_id, seq: d.seq, sender: d.sender, epoch, plaintext: data, at: Instant::now() }));
             }
             Ok(Processed::Commit(summary)) => {
                 if summary.self_removed {

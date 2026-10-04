@@ -60,6 +60,23 @@ pub fn create_key_package(cs: CipherSuite, signer: &Signer) -> Result<KeyPackage
     create_key_package_with(cs, signer, default_capabilities(cs), vec![], vec![])
 }
 
+/// Default key package lifetime: one hour back for clock skew, 84 days forward.
+pub const KEY_PACKAGE_LIFETIME_SECS: u64 = 84 * 24 * 3600;
+/// Largest not_after - not_before accepted when `GroupConfig::max_lifetime_range` is on.
+pub const MAX_LIFETIME_RANGE_SECS: u64 = KEY_PACKAGE_LIFETIME_SECS + 3600;
+
+fn default_lifetime() -> Lifetime {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        Lifetime { not_before: now.saturating_sub(3600), not_after: now + KEY_PACKAGE_LIFETIME_SECS }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        Lifetime { not_before: 0, not_after: u64::MAX }
+    }
+}
+
 pub fn create_key_package_with(
     cs: CipherSuite,
     signer: &Signer,
@@ -74,7 +91,7 @@ pub fn create_key_package_with(
         signature_key: signer.signature_pub.clone(),
         credential: signer.credential.clone(),
         capabilities,
-        leaf_node_source: LeafNodeSource::KeyPackage(Lifetime { not_before: 0, not_after: u64::MAX }),
+        leaf_node_source: LeafNodeSource::KeyPackage(default_lifetime()),
         extensions: leaf_extensions,
         signature: vec![],
     };
@@ -96,11 +113,15 @@ pub struct GroupConfig {
     pub ratchet_tree_extension: bool,
     /// Put external_pub in GroupInfo so outsiders can join by external commit.
     pub external_pub_extension: bool,
+    /// Reject key packages whose lifetime spans more than this many seconds
+    /// (RFC 9420 section 10.1 leaves the bound to the application). Off by
+    /// default because the official test vectors use unbounded lifetimes.
+    pub max_lifetime_range: Option<u64>,
 }
 
 impl Default for GroupConfig {
     fn default() -> Self {
-        GroupConfig { encrypt_handshake: false, padding: 0, max_past_epochs: 2, ratchet_tree_extension: true, external_pub_extension: false }
+        GroupConfig { encrypt_handshake: false, padding: 0, max_past_epochs: 2, ratchet_tree_extension: true, external_pub_extension: false, max_lifetime_range: None }
     }
 }
 
@@ -283,7 +304,7 @@ impl Group {
             signature_key: signer.signature_pub.clone(),
             credential: signer.credential.clone(),
             capabilities: default_capabilities(cs),
-            leaf_node_source: LeafNodeSource::KeyPackage(Lifetime { not_before: 0, not_after: u64::MAX }),
+            leaf_node_source: LeafNodeSource::KeyPackage(default_lifetime()),
             extensions: vec![],
             signature: vec![],
         };
@@ -541,6 +562,11 @@ impl Group {
             return proto("key package leaf source must be key_package");
         }
         kp.leaf_node.verify(self.cs, None)?;
+        if let (Some(max), LeafNodeSource::KeyPackage(l)) = (self.config.max_lifetime_range, &kp.leaf_node.leaf_node_source) {
+            if l.not_after.saturating_sub(l.not_before) > max {
+                return proto("key package lifetime longer than this group accepts");
+            }
+        }
         if kp.init_key == kp.leaf_node.encryption_key {
             return proto("init key equals encryption key");
         }

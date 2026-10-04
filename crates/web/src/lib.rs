@@ -36,10 +36,14 @@ pub struct WebClient {
     next_req: u64,
     /// Requests waiting for a key package reply: req_id -> (intent, key packages so far).
     kp_waits: HashMap<u64, (Intent, usize)>,
+    kp_targets: HashMap<u64, ClientId>,
+    kp_tries: HashMap<u64, u32>,
     collected: HashMap<u64, Vec<mls::messages::KeyPackage>>,
     /// Commit requests in flight: msg_id -> intent, so a lost race can be retried.
     commits: HashMap<MsgId, Intent>,
     retry: Vec<Intent>,
+    /// Key package fetches that found nothing yet: (request id, device, tries).
+    refetch: Vec<(u64, ClientId, u32)>,
     out: Vec<Vec<u8>>,
     events: Vec<Value>,
 }
@@ -61,9 +65,12 @@ impl WebClient {
             groups: HashMap::new(),
             next_req: 1,
             kp_waits: HashMap::new(),
+            kp_targets: HashMap::new(),
+            kp_tries: HashMap::new(),
             collected: HashMap::new(),
             commits: HashMap::new(),
             retry: vec![],
+            refetch: vec![],
             out: vec![],
             events: vec![],
         }
@@ -90,6 +97,15 @@ impl WebClient {
     pub fn take_events(&mut self) -> String {
         let v = Value::Array(std::mem::take(&mut self.events));
         v.to_string()
+    }
+
+    /// Call periodically: retries key package fetches that found nothing.
+    pub fn tick(&mut self) {
+        for (r, who, tries) in std::mem::take(&mut self.refetch) {
+            self.kp_tries.insert(r, tries);
+            self.send(ClientMsg::FetchKeyPackage { req_id: r, client_id: who });
+        }
+        self.run_retries();
     }
 
     /// Call on every (re)connect.
@@ -145,6 +161,7 @@ impl WebClient {
                 for (i, id) in ids.iter().enumerate() {
                     // One request id per key package, offset so replies can be matched.
                     let r = req * 1000 + i as u64;
+                    self.kp_targets.insert(r, id.clone());
                     self.send(ClientMsg::FetchKeyPackage { req_id: r, client_id: id.clone() });
                 }
             }
@@ -218,7 +235,15 @@ impl WebClient {
                         list.push(k);
                     }
                 } else if key_package_missing(&self.kp_waits, base) {
-                    self.emit(json!({"type": "error", "error": "no key package published for that device"}));
+                    // The device may not have published yet: ask again on the next tick.
+                    let who = self.kp_targets.get(&req_id).cloned().unwrap_or_default();
+                    let tries = self.kp_tries.get(&req_id).copied().unwrap_or(0);
+                    if tries < 40 {
+                        self.refetch.push((req_id, who, tries + 1));
+                    } else {
+                        self.kp_waits.remove(&base);
+                        self.emit(json!({"type": "error", "error": "that device has not published a key package"}));
+                    }
                 }
                 if let Some((intent, need)) = self.kp_waits.get(&base).cloned() {
                     if self.collected.get(&base).map(|l| l.len()) == Some(need) {
@@ -369,6 +394,9 @@ fn apply(me: &[u8], st: &mut GroupState, d: Delivery, evs: &mut Vec<Value>) {
         }
         Ok(Processed::Proposal { .. }) => {}
         Err(e) => evs.push(json!({"type": "error", "group": group, "seq": d.seq, "error": e.to_string()})),
+    }
+    if d.kind != Kind::Commit {
+        return;
     }
     let t = st.group.tree();
     st.last_rekeyed = (0..(2 * t.n_leaves() - 1))
