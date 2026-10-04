@@ -1,0 +1,27 @@
+== fenced
+Model checking completed. No error has been found.
+63616 states generated, 8914 distinct states found, 0 states left on queue.
+== fenced_2x2
+Model checking completed. No error has been found.
+389008 states generated, 50869 distinct states found, 0 states left on queue.
+== fenced_logorder
+Model checking completed. No error has been found.
+37327 states generated, 5068 distinct states found, 0 states left on queue.
+== unfenced_logorder
+Error: Invariant AckMeansApplied is violated.
+119 states generated, 51 distinct states found, 33 states left on queue.
+== unfenced_mergeonack
+Error: Invariant AckMeansApplied is violated.
+98 states generated, 45 distinct states found, 28 states left on queue.
+== relay
+Error: Invariant AckMeansApplied is violated.
+140 states generated, 53 distinct states found, 30 states left on queue.
+== unfenced_logorder_nofork
+Model checking completed. No error has been found.
+121391 states generated, 16220 distinct states found, 0 states left on queue.
+== unfenced_mergeonack_nofork
+Error: Invariant NoFork is violated.
+387 states generated, 143 distinct states found, 85 states left on queue.
+== relay_nofork
+Error: Invariant NoFork is violated.
+304 states generated, 118 distinct states found, 79 states left on queue.

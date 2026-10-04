@@ -19,6 +19,9 @@ use crate::tree_math::{self as tm, LeafIndex};
 use crate::treekem::{self, TreePrivate};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+/// How many past epochs' resumption PSKs a member keeps.
+pub const RESUMPTION_WINDOW: u64 = 64;
+
 /// A member's long-term signing identity.
 #[derive(Clone, Debug)]
 pub struct Signer {
@@ -135,7 +138,8 @@ struct PastEpoch {
     context: GroupContext,
     secret_tree: SecretTree,
     sender_data_secret: Vec<u8>,
-    signature_keys: HashMap<LeafIndex, Vec<u8>>,
+    /// The tree of that epoch (nodes are shared, so this is cheap to keep).
+    tree: RatchetTree,
 }
 
 /// What processing a message did.
@@ -330,7 +334,10 @@ impl Group {
     }
 
     fn remember_resumption(&mut self) {
-        self.psks.resumption.insert((self.context.group_id.clone(), self.context.epoch), self.secrets.resumption_psk.clone());
+        let (g, e) = (self.context.group_id.clone(), self.context.epoch);
+        self.psks.resumption.insert((g.clone(), e), self.secrets.resumption_psk.clone());
+        // Keep a bounded window of this group's past resumption PSKs.
+        self.psks.resumption.retain(|(gg, ee), _| *gg != g || *ee + RESUMPTION_WINDOW > e);
     }
 
     /// Join from a Welcome (RFC 9420 section 12.4.3.1).
@@ -710,7 +717,7 @@ impl Group {
             context: self.context.clone(),
             secret_tree: self.secret_tree.clone(),
             sender_data_secret: self.secrets.sender_data_secret.clone(),
-            signature_keys: self.tree.members().map(|(i, l)| (i, l.signature_key.clone())).collect(),
+            tree: self.tree.clone(),
         }
     }
 
@@ -819,7 +826,9 @@ impl Group {
 
         // Past epochs: the staged state keeps ours plus the current one.
         let mut past = self.past.clone();
-        past.push_back(self.archive_epoch());
+        if self.config.max_past_epochs > 0 {
+            past.push_back(self.archive_epoch());
+        }
         next.past = past;
         while next.past.len() > next.config.max_past_epochs {
             next.past.pop_front();
@@ -962,8 +971,8 @@ impl Group {
         let past = self.past.iter_mut().find(|p| p.epoch == pm.epoch).ok_or(Error::WrongEpoch { got: pm.epoch, want: self.context.epoch })?;
         let ac = framing::decrypt_private(cs, pm, &mut past.secret_tree, &past.sender_data_secret)?;
         let Sender::Member(l) = ac.content.sender else { return proto("application from non-member") };
-        let key = past.signature_keys.get(&l).ok_or_else(|| Error::Protocol("sender unknown in past epoch".into()))?;
-        framing::verify_content_signature(cs, &ac, Some(&past.context), key)?;
+        let key = past.tree.leaf(l).ok_or_else(|| Error::Protocol("sender unknown in past epoch".into()))?.signature_key.clone();
+        framing::verify_content_signature(cs, &ac, Some(&past.context), &key)?;
         let Content::Application(data) = &ac.content.content else { return proto("not application") };
         Ok(Processed::Application { sender: l, data: data.clone(), authenticated_data: ac.content.authenticated_data.clone(), epoch: pm.epoch })
     }
@@ -1084,9 +1093,10 @@ impl Group {
         if next.reinit.is_some() {
             next.active = false;
         }
-        let archived = self.archive_epoch();
         next.past = self.past.clone();
-        next.push_past(archived);
+        if self.config.max_past_epochs > 0 {
+            next.push_past(self.archive_epoch());
+        }
         *self = next;
         Ok(summary)
     }
@@ -1244,4 +1254,27 @@ pub fn validate_tree(tree: &RatchetTree, group_id: &[u8]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "sim")]
+impl Group {
+    /// Experiment helper: this group's state as seen by another member whose
+    /// signing key and leaf HPKE key the harness generated. Every member shares
+    /// the public tree and epoch secrets, so a commit produced from this view is
+    /// byte-for-byte a commit that member could have produced. Only the
+    /// committer's own leaf key is needed to build a commit. Not for real use.
+    pub fn impersonate(&self, leaf: LeafIndex, signer: Signer, leaf_priv: Vec<u8>) -> Group {
+        let mut g = self.clone();
+        g.private = TreePrivate::new(leaf, leaf_priv);
+        g.signer = signer;
+        g.pending = None;
+        g.proposals.clear();
+        g.own_updates.clear();
+        g
+    }
+
+    /// Size in bytes of the serialized public ratchet tree.
+    pub fn tree_bytes(&self) -> usize {
+        self.tree.to_bytes().len()
+    }
 }

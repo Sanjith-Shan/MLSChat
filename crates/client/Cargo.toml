@@ -1,0 +1,19 @@
+[package]
+name = "client"
+description = "MLSChat client: MLS group state over the delivery service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mls = { path = "../mls" }
+ds = { path = "../ds" }
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"
+proptest = "1"
+anyhow = "1"

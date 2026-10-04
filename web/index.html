@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MLSChat</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="title">MLSChat <span class="sub">group end-to-end encryption on MLS (RFC 9420)</span></div>
+  <div class="note">Each pane is a separate device running the MLS library in WebAssembly with its own connection. The server orders and relays ciphertext it cannot read. Research build, not audited.</div>
+  <div class="controls">
+    <input id="new-device" placeholder="device name" size="10">
+    <button id="add-device">Add device</button>
+    <span id="server-status" class="status">server: connecting</span>
+  </div>
+</header>
+<main id="devices"></main>
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+[package]
+name = "wire"
+description = "MLSChat client/server protocol (shared by the server, native client and WASM client)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mls = { path = "../mls" }

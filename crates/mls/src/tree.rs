@@ -8,13 +8,15 @@ use crate::messages::*;
 use crate::tree_math::{self as tm, LeafIndex, NodeIndex};
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct RatchetTree {
     pub cs: CipherSuite,
     /// Always `node_width(n_leaves)` entries, with `n_leaves` a power of two.
-    nodes: Vec<Option<Node>>,
-    hash_cache: RefCell<Vec<Option<Vec<u8>>>>,
+    /// Nodes are shared so cloning a tree (which every commit does) is cheap.
+    nodes: Vec<Option<Arc<Node>>>,
+    hash_cache: RefCell<Vec<Option<Arc<[u8]>>>>,
 }
 
 impl PartialEq for RatchetTree {
@@ -25,7 +27,7 @@ impl PartialEq for RatchetTree {
 
 impl RatchetTree {
     pub fn new(cs: CipherSuite, first: LeafNode) -> Self {
-        RatchetTree { cs, nodes: vec![Some(Node::Leaf(first))], hash_cache: RefCell::new(vec![None]) }
+        RatchetTree { cs, nodes: vec![Some(Arc::new(Node::Leaf(first)))], hash_cache: RefCell::new(vec![None]) }
     }
 
     /// Build from the (possibly truncated) `ratchet_tree` extension encoding.
@@ -50,7 +52,8 @@ impl RatchetTree {
         let n = leaves.next_power_of_two();
         list.resize(tm::node_width(n) as usize, None);
         let w = list.len();
-        Ok(RatchetTree { cs, nodes: list, hash_cache: RefCell::new(vec![None; w]) })
+        let nodes = list.into_iter().map(|n| n.map(Arc::new)).collect();
+        Ok(RatchetTree { cs, nodes, hash_cache: RefCell::new(vec![None; w]) })
     }
 
     pub fn from_bytes(cs: CipherSuite, b: &[u8]) -> Result<Self> {
@@ -59,7 +62,7 @@ impl RatchetTree {
 
     /// Truncated node list for the `ratchet_tree` extension.
     pub fn to_nodes(&self) -> RatchetTreeNodes {
-        let mut v = self.nodes.clone();
+        let mut v: RatchetTreeNodes = self.nodes.iter().map(|n| n.as_deref().cloned()).collect();
         while matches!(v.last(), Some(None)) {
             v.pop();
         }
@@ -79,7 +82,7 @@ impl RatchetTree {
     }
 
     pub fn node(&self, x: NodeIndex) -> Option<&Node> {
-        self.nodes.get(x as usize).and_then(|n| n.as_ref())
+        self.nodes.get(x as usize).and_then(|n| n.as_deref())
     }
 
     pub fn is_blank(&self, x: NodeIndex) -> bool {
@@ -119,7 +122,7 @@ impl RatchetTree {
     }
 
     pub fn set_node(&mut self, x: NodeIndex, node: Option<Node>) {
-        self.nodes[x as usize] = node;
+        self.nodes[x as usize] = node.map(Arc::new);
         self.invalidate(x);
     }
 
@@ -176,10 +179,10 @@ impl RatchetTree {
 
     pub fn tree_hash(&self, x: NodeIndex) -> Vec<u8> {
         if let Some(h) = &self.hash_cache.borrow()[x as usize] {
-            return h.clone();
+            return h.to_vec();
         }
         let h = self.compute_tree_hash(x, &HashSet::new());
-        self.hash_cache.borrow_mut()[x as usize] = Some(h.clone());
+        self.hash_cache.borrow_mut()[x as usize] = Some(Arc::from(h.as_slice()));
         h
     }
 
@@ -342,7 +345,7 @@ impl RatchetTree {
         let x = tm::leaf_to_node(l);
         self.set_node(x, Some(Node::Leaf(ln)));
         for p in tm::direct_path(x, self.n_leaves()) {
-            if let Some(Node::Parent(pn)) = &mut self.nodes[p as usize] {
+            if let Some(Node::Parent(pn)) = self.nodes[p as usize].as_mut().map(Arc::make_mut) {
                 pn.unmerged_leaves.push(l);
                 self.invalidate(p);
             }
